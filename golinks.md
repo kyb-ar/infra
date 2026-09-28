@@ -38,8 +38,14 @@ Environment variables:
 ## Docker setup
 
 - `Dockerfile`: `python:3-slim`, copies `golinks.py` into `/app`, exposes 80.
-- `docker-compose.yml`: builds image `golinks:latest`, publishes `80:80`,
-  `restart: unless-stopped`, mounts `./data:/data:ro`.
+- `docker-compose.yml`: builds image `golinks:latest`,
+  `restart: unless-stopped`, mounts `./data:/data:ro`. Publishes no ports;
+  joins the external `edge` network and is served through Envoy (see
+  `envoy/README.md`) for hostnames `go` and `go.*`.
+
+Status as of 2026-09-27: the switch from publishing `80:80` to the `edge`
+network is made in the local checkout but not yet committed, pushed, or
+pulled on the server.
 
 Commands (run from the repo directory on the server):
 

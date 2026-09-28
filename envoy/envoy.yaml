@@ -1,0 +1,129 @@
+# Envoy edge proxy for the home server.
+#
+# Every service sits on the "edge" Docker network and is reached only through
+# Envoy. Requests are routed by Host header.
+#
+# To add a service:
+#   1. Put its container on the "edge" network (no published ports).
+#   2. Add a cluster below pointing at <container-name>:<port>.
+#   3. Add a virtual_host in the HTTP listener (and the HTTPS listener, once
+#      that is enabled) mapping its hostnames to the cluster.
+#
+# Validate after editing (on the server, from this directory):
+#   docker run --rm -v "$PWD/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
+#     envoyproxy/envoy:v1.34-latest --mode validate -c /etc/envoy/envoy.yaml
+
+admin:
+  # Only reachable from inside the container:
+  #   docker compose exec envoy curl -s localhost:9901/clusters
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: http
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: http
+                use_remote_address: true
+                # "go:80" and "go" should match the same virtual host.
+                strip_any_host_port: true
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: http
+                  virtual_hosts:
+                    - name: golinks
+                      # "go" for the bare LAN name, "go.*" for go.lan, go.home, etc.
+                      domains: ["go", "go.*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: golinks }
+
+                    # Example for a service that should be HTTPS-only once the
+                    # HTTPS listener is enabled:
+                    #
+                    # - name: jira
+                    #   domains: ["jira", "jira.*"]
+                    #   require_tls: ALL
+
+                    # Anything else: 404 instead of guessing a backend.
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 404
+                            body: { inline_string: "No service for this hostname.\n" }
+
+    # HTTPS listener. To enable:
+    #   1. Put certs in ./certs (see README.md).
+    #   2. Uncomment this listener and the 443 port in docker-compose.yml.
+    #   3. Add one filter_chain per certificate, matched by SNI.
+    #
+    # - name: https
+    #   address:
+    #     socket_address: { address: 0.0.0.0, port_value: 8443 }
+    #   listener_filters:
+    #     - name: envoy.filters.listener.tls_inspector
+    #       typed_config:
+    #         "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+    #   filter_chains:
+    #     - filter_chain_match:
+    #         server_names: ["jira.example.com"]
+    #       transport_socket:
+    #         name: envoy.transport_sockets.tls
+    #         typed_config:
+    #           "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+    #           common_tls_context:
+    #             tls_certificates:
+    #               - certificate_chain: { filename: /etc/envoy/certs/jira.example.com/fullchain.pem }
+    #                 private_key: { filename: /etc/envoy/certs/jira.example.com/privkey.pem }
+    #       filters:
+    #         - name: envoy.filters.network.http_connection_manager
+    #           typed_config:
+    #             "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+    #             stat_prefix: https
+    #             use_remote_address: true
+    #             strip_any_host_port: true
+    #             access_log:
+    #               - name: envoy.access_loggers.stdout
+    #                 typed_config:
+    #                   "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+    #             http_filters:
+    #               - name: envoy.filters.http.router
+    #                 typed_config:
+    #                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+    #             route_config:
+    #               name: https
+    #               virtual_hosts:
+    #                 - name: jira
+    #                   domains: ["jira.example.com"]
+    #                   routes:
+    #                     - match: { prefix: "/" }
+    #                       route: { cluster: jira }
+
+  clusters:
+    - name: golinks
+      type: STRICT_DNS
+      connect_timeout: 2s
+      dns_lookup_family: V4_ONLY
+      load_assignment:
+        cluster_name: golinks
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    # Container name on the "edge" network, resolved by Docker DNS.
+                    socket_address: { address: golinks, port_value: 80 }

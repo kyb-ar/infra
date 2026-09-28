@@ -1,0 +1,18 @@
+services:
+  envoy:
+    image: envoyproxy/envoy:v1.34-latest
+    restart: unless-stopped
+    # Envoy runs as a non-root user in the image, so it listens on 8080/8443
+    # inside the container and Docker maps the privileged ports.
+    ports:
+      - "80:8080"
+      # - "443:8443"
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./certs:/etc/envoy/certs:ro
+    networks:
+      - edge
+
+networks:
+  edge:
+    external: true
