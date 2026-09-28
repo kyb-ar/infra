@@ -9,9 +9,7 @@
 #   3. Add a virtual_host in the HTTP listener (and the HTTPS listener, once
 #      that is enabled) mapping its hostnames to the cluster.
 #
-# Validate after editing (on the server, from this directory):
-#   docker run --rm -v "$PWD/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
-#     envoyproxy/envoy:v1.34-latest --mode validate -c /etc/envoy/envoy.yaml
+# After editing, apply with ./reload (validates first, then restarts Envoy).
 
 admin:
   # Only reachable from inside the container:

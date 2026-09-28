@@ -40,11 +40,22 @@ Check it:
    network (declared `external: true`, same as golinks).
 2. In `envoy.yaml`: add a cluster pointing at `<compose service name>:<port>`
    and a virtual host mapping its hostnames to that cluster.
-3. Validate, then restart Envoy:
+3. Apply it with `./reload` (see below).
 
-       docker run --rm -v "$PWD/envoy.yaml:/etc/envoy/envoy.yaml:ro" \
-         envoyproxy/envoy:v1.34-latest --mode validate -c /etc/envoy/envoy.yaml
-       docker compose restart envoy
+## Changing the config
+
+Edit `envoy.yaml`, then run:
+
+    ./reload
+
+It validates the config using the same image as the running Envoy and only
+restarts if the config is valid, then shows recent logs and status. Works
+from any directory (`~/infra/envoy/reload`, etc.).
+
+`docker compose up -d` does NOT apply `envoy.yaml` edits (Compose only sees
+changes to `docker-compose.yml` or the image). Use `docker compose up -d`
+only after editing `docker-compose.yml`, e.g. opening 443 or bumping the
+image.
 
 Clients also need the hostname to resolve to the server (router DNS,
 Pi-hole, `/etc/hosts`, etc.).
@@ -63,7 +74,7 @@ The HTTPS listener is written but commented out in `envoy.yaml`.
    (`server_names` = the hostnames it covers) with a matching virtual host.
 3. For services that should be HTTPS-only, add `require_tls: ALL` to their
    virtual host on the HTTP listener; Envoy then redirects HTTP to HTTPS.
-4. Envoy reads cert files at startup, so restart it after renewing certs.
+4. Envoy reads cert files at startup, so run `./reload` after renewing certs.
 
 Bare names like `go` can't get publicly trusted certs, so golinks can stay
 HTTP while other services use HTTPS.

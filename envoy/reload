@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Validate envoy.yaml, then restart Envoy to apply it.
+# Does nothing if the config is invalid, so a typo can't take the proxy down.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+echo "Validating envoy.yaml..."
+# Same image and mounts as the running service; ports are not published by `run`.
+if ! docker compose run --rm --no-deps envoy --mode validate -c /etc/envoy/envoy.yaml; then
+    echo "Config is invalid; Envoy was not restarted." >&2
+    exit 1
+fi
+
+echo "Restarting Envoy..."
+docker compose restart envoy
+sleep 2
+docker compose logs --tail=20 envoy
+docker compose ps envoy
