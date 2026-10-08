@@ -5,6 +5,7 @@ which routes by hostname to containers on the shared `edge` Docker network.
 Backend containers do not publish ports themselves.
 
     client -> :80 / :443 (host) -> envoy -> edge network -> golinks:80
+                                                         -> flashcards:8000
                                                          -> <next service>
 
 ## Current routes
@@ -12,6 +13,7 @@ Backend containers do not publish ports themselves.
 | Hostnames       | Backend        | TLS |
 |-----------------|----------------|-----|
 | `go`, `go.*`    | `golinks:80`   | no  |
+| `flash`, `flash.*`, `flashcards`, `flashcards.*` | `flashcards:8000` | no |
 | anything else   | 404            |     |
 
 ## First-time setup (on the server)

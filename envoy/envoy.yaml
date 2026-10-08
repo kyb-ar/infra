@@ -49,6 +49,12 @@ static_resources:
                         - match: { prefix: "/" }
                           route: { cluster: golinks }
 
+                    - name: flashcards
+                      domains: ["flash", "flash.*", "flashcards", "flashcards.*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: flashcards }
+
                     # Example for a service that should be HTTPS-only once the
                     # HTTPS listener is enabled:
                     #
@@ -125,3 +131,15 @@ static_resources:
                   address:
                     # Container name on the "edge" network, resolved by Docker DNS.
                     socket_address: { address: golinks, port_value: 80 }
+
+    - name: flashcards
+      type: STRICT_DNS
+      connect_timeout: 2s
+      dns_lookup_family: V4_ONLY
+      load_assignment:
+        cluster_name: flashcards
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: flashcards, port_value: 8000 }
