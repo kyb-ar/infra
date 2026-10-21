@@ -6,6 +6,7 @@ Backend containers do not publish ports themselves.
 
     client -> :80 / :443 (host) -> envoy -> edge network -> golinks:80
                                                          -> flashcards:8000
+                                                         -> synapse:8008
                                                          -> <next service>
 
 ## Current routes
@@ -14,6 +15,7 @@ Backend containers do not publish ports themselves.
 |-----------------|----------------|-----|
 | `go`, `go.*`    | `golinks:80`   | no  |
 | `flash`, `flash.*`, `flashcards`, `flashcards.*` | `flashcards:8000` | no |
+| `matrix`, `matrix.*` | `synapse:8008` (see `../matrix/README.md`) | no |
 | anything else   | 404            |     |
 
 ## First-time setup (on the server)

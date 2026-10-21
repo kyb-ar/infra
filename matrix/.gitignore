@@ -1,0 +1,7 @@
+# Secrets and data: the Postgres password, bridge tokens, the WhatsApp and Google Messages
+# sessions, and every bridged message. Never commit these.
+.env
+postgres/
+synapse/
+whatsapp/
+gmessages/

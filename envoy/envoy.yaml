@@ -55,6 +55,14 @@ static_resources:
                         - match: { prefix: "/" }
                           route: { cluster: flashcards }
 
+                    - name: matrix
+                      domains: ["matrix", "matrix.*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          # Envoy's 15s default would cut off Matrix /sync long-polls
+                          # (clients hold them open for ~30s) and slow media uploads.
+                          route: { cluster: synapse, timeout: 300s }
+
                     # Example for a service that should be HTTPS-only once the
                     # HTTPS listener is enabled:
                     #
@@ -143,3 +151,16 @@ static_resources:
               - endpoint:
                   address:
                     socket_address: { address: flashcards, port_value: 8000 }
+
+    - name: synapse
+      type: STRICT_DNS
+      connect_timeout: 2s
+      dns_lookup_family: V4_ONLY
+      load_assignment:
+        cluster_name: synapse
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    # The "synapse" service of ../matrix, on the "edge" network.
+                    socket_address: { address: synapse, port_value: 8008 }

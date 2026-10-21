@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# Sets up (or re-applies the config of) the Matrix stack: Synapse, Postgres, and the
+# WhatsApp and Google Messages bridges. Safe to re-run; each step skips what already exists.
+# See README.md.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+BRIDGES=(whatsapp gmessages)
+
+die() { echo "error: $*" >&2; exit 1; }
+step() { echo; echo "== $*"; }
+rand_hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
+# Runs a shell script (from stdin) as root in the WhatsApp bridge image, which ships yq, with
+# this directory mounted at /stack. All config edits go through this because the data
+# directories are owned by the containers' users, not by you.
+tools() {
+    docker compose run --rm --no-deps -T --entrypoint sh -v "$PWD:/stack" -w /stack \
+        -e SERVER_NAME -e ADMIN_USER -e POSTGRES_PASSWORD -e PUBLIC_URL \
+        -e BRIDGE -e DP_TOKEN -e HS_TOKEN -e LOCALPART \
+        whatsapp -s "$@"
+}
+exists() { tools <<<"test -f '$1'"; }
+
+synapse_id() { docker compose ps -q synapse; }
+wait_for_synapse() {
+    echo "Waiting for Synapse..."
+    for _ in $(seq 90); do
+        if [[ "$(docker inspect -f '{{.State.Health.Status}}' "$(synapse_id)" 2>/dev/null)" == healthy ]]; then
+            return
+        fi
+        sleep 2
+    done
+    die "Synapse did not become healthy; check: docker compose logs synapse"
+}
+
+# --- .env ------------------------------------------------------------------------------
+
+if [[ ! -f .env ]]; then
+    sed "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(rand_hex 24)/" .env.example > .env
+    chmod 600 .env
+    echo "Created .env. Set SERVER_NAME and ADMIN_USER in it, then run ./setup again."
+    exit 0
+fi
+set -a
+. ./.env
+set +a
+[[ -n "${SERVER_NAME:-}" ]] || die "set SERVER_NAME in .env"
+[[ -n "${ADMIN_USER:-}" ]] || die "set ADMIN_USER in .env"
+[[ "${POSTGRES_PASSWORD:-}" =~ ^[0-9a-f]+$ ]] ||
+    die "POSTGRES_PASSWORD in .env must be hex (it is embedded in database URLs)"
+export PUBLIC_URL=${PUBLIC_URL:-http://matrix/}
+export BRIDGE="" DP_TOKEN="" HS_TOKEN="" LOCALPART=""
+
+docker network inspect edge >/dev/null 2>&1 ||
+    die "Docker network 'edge' is missing; see ../envoy/README.md (docker network create edge)"
+
+# --- Synapse ---------------------------------------------------------------------------
+
+step "Synapse config"
+if exists synapse/homeserver.yaml; then
+    echo "synapse/homeserver.yaml exists"
+else
+    docker compose run --rm --no-deps \
+        -e SYNAPSE_SERVER_NAME="$SERVER_NAME" -e SYNAPSE_REPORT_STATS=no synapse generate
+fi
+current=$(tools <<<'yq .server_name synapse/homeserver.yaml')
+[[ "$current" == "$SERVER_NAME" ]] ||
+    die "synapse/homeserver.yaml has server_name '$current' but .env says '$SERVER_NAME'; the server name cannot change"
+
+# Double puppeting: lets the bridges act as your own Matrix user, so messages you send from
+# your phone show up as from you rather than from a "ghost" of your own number.
+step "Double puppeting"
+if exists synapse/appservices/doublepuppet.yaml; then
+    echo "synapse/appservices/doublepuppet.yaml exists"
+else
+    DP_TOKEN=$(rand_hex 32) HS_TOKEN=$(rand_hex 32) LOCALPART="doublepuppet_$(rand_hex 8)"
+    tools <<'EOF'
+set -e
+mkdir -p synapse/appservices
+yq -n '
+  .id = "doublepuppet" |
+  .url = null |
+  .as_token = strenv(DP_TOKEN) |
+  .hs_token = strenv(HS_TOKEN) |
+  .sender_localpart = strenv(LOCALPART) |
+  .rate_limited = false |
+  .namespaces.users = [{"regex": "@.*:" + (strenv(SERVER_NAME) | sub("\.", "\\.")), "exclusive": false}]
+' > synapse/appservices/doublepuppet.yaml
+EOF
+    echo "Wrote synapse/appservices/doublepuppet.yaml"
+fi
+DP_TOKEN=$(tools <<<'yq .as_token synapse/appservices/doublepuppet.yaml')
+
+# --- Bridges ---------------------------------------------------------------------------
+
+for BRIDGE in "${BRIDGES[@]}"; do
+    step "$BRIDGE bridge"
+    if ! exists "$BRIDGE/config.yaml"; then
+        # With no config, the image writes the default one and exits.
+        docker compose run --rm --no-deps "$BRIDGE"
+    fi
+
+    tools <<'EOF'
+set -e
+yq -I4 -i '
+  .homeserver.address = "http://synapse:8008" |
+  .homeserver.domain = strenv(SERVER_NAME) |
+  .appservice.address = "http://" + strenv(BRIDGE) + ":" + (.appservice.port | tostring) |
+  .appservice.hostname = "0.0.0.0" |
+  .database.type = "postgres" |
+  .database.uri = "postgres://synapse:" + strenv(POSTGRES_PASSWORD) + "@postgres/" + strenv(BRIDGE) + "?sslmode=disable" |
+  .bridge.permissions = {} |
+  .bridge.permissions[strenv(SERVER_NAME)] = "user" |
+  .bridge.permissions["@" + strenv(ADMIN_USER) + ":" + strenv(SERVER_NAME)] = "admin" |
+  .matrix.federate_rooms = false |
+  .backfill.enabled = true |
+  .double_puppet.servers = {} |
+  .double_puppet.secrets = {} |
+  .double_puppet.secrets[strenv(SERVER_NAME)] = "as_token:" + strenv(DP_TOKEN) |
+  .encryption.allow = false |
+  .logging.min_level = "info" |
+  del(.logging.writers[] | select(.type == "file"))
+' "$BRIDGE/config.yaml"
+if [ "$BRIDGE" = whatsapp ]; then
+  # Status updates (stories) would otherwise get their own busy room.
+  yq -I4 -i '.network.enable_status_broadcast = false' whatsapp/config.yaml
+fi
+EOF
+    echo "Configured $BRIDGE/config.yaml"
+
+    if ! exists "$BRIDGE/registration.yaml"; then
+        # With a config but no registration, the image writes registration.yaml and exits.
+        docker compose run --rm --no-deps "$BRIDGE"
+    fi
+    tools <<'EOF'
+set -e
+mkdir -p synapse/appservices
+cp "$BRIDGE/registration.yaml" "synapse/appservices/$BRIDGE.yaml"
+EOF
+    echo "Registered $BRIDGE with Synapse (synapse/appservices/$BRIDGE.yaml)"
+done
+
+step "Synapse settings"
+tools <<'EOF'
+set -e
+yq -i '
+  .public_baseurl = strenv(PUBLIC_URL) |
+  .database = {"name": "psycopg2", "args": {"user": "synapse", "password": strenv(POSTGRES_PASSWORD), "dbname": "synapse", "host": "postgres", "cp_min": 5, "cp_max": 10}} |
+  .federation_domain_whitelist = [] |
+  .trusted_key_servers = [] |
+  .suppress_key_server_warning = true |
+  .presence.enabled = false |
+  .enable_registration = false |
+  (.listeners[] | select(.port == 8008)).x_forwarded = true |
+  .app_service_config_files = ["/data/appservices/whatsapp.yaml", "/data/appservices/gmessages.yaml", "/data/appservices/doublepuppet.yaml"]
+' synapse/homeserver.yaml
+# Synapse runs as 991; the edits above were made as root.
+chown -R 991:991 synapse/homeserver.yaml synapse/appservices
+chmod 600 synapse/homeserver.yaml synapse/appservices/*.yaml
+EOF
+echo "Configured synapse/homeserver.yaml"
+
+# --- Start -----------------------------------------------------------------------------
+
+step "Starting"
+was_running=$(synapse_id)
+docker compose up -d
+if [[ -n "$was_running" ]]; then
+    # Already running: restart so config and registration changes take effect.
+    docker compose restart synapse
+    wait_for_synapse
+    docker compose restart "${BRIDGES[@]}"
+fi
+wait_for_synapse
+
+step "Account"
+mxid="@$ADMIN_USER:$SERVER_NAME"
+if [[ -n "$(docker compose exec -T postgres psql -U synapse -d synapse -tAc "SELECT 1 FROM users WHERE name = '$mxid'")" ]]; then
+    echo "$mxid exists"
+else
+    echo "Creating $mxid. Choose a password:"
+    docker compose exec synapse register_new_matrix_user \
+        -c /data/homeserver.yaml -u "$ADMIN_USER" -a http://localhost:8008
+fi
+
+# --- Checks ----------------------------------------------------------------------------
+
+step "Checks"
+host=${PUBLIC_URL#*://}
+host=${host%%[:/]*}
+if ! getent hosts "$host" >/dev/null; then
+    echo "WARN: '$host' does not resolve on this machine. Add '127.0.0.1 $host' to /etc/hosts."
+elif code=$(curl -s -o /dev/null -w '%{http_code}' "${PUBLIC_URL%/}/_matrix/client/versions") &&
+    [[ "$code" == 200 ]]; then
+    echo "OK: $PUBLIC_URL reaches Synapse through Envoy"
+else
+    echo "WARN: ${PUBLIC_URL%/}/_matrix/client/versions returned $code."
+    echo "      Is the matrix route in ../envoy/envoy.yaml applied (../envoy/reload)?"
+fi
+docker compose ps
+
+cat <<EOF
+
+Done. Next: link your accounts from Element Desktop (homeserver $PUBLIC_URL, user $mxid).
+  WhatsApp:        message @whatsappbot:$SERVER_NAME  ->  login qr
+  Google Messages: message @gmessagesbot:$SERVER_NAME ->  login  (then pick QR)
+See README.md for the phone side.
+EOF

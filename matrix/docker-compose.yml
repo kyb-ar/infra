@@ -1,0 +1,60 @@
+# Matrix homeserver (Synapse) plus mautrix bridges for WhatsApp and Google Messages (SMS/RCS).
+#
+# First time: ./setup (see README.md). Only Synapse joins the "edge" network; Envoy routes
+# "matrix" to it. Postgres and the bridges are reachable only inside this stack.
+#
+# Images are pinned; bump them deliberately (see README.md, "Upgrading").
+
+services:
+  postgres:
+    # Major version pinned: moving to a new major needs a dump and restore.
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env}
+      # Synapse refuses to start on a database without C collation.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+      # Creates the bridge databases. Only runs when ./postgres is empty.
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "synapse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  synapse:
+    image: matrixdotorg/synapse:v1.163.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Config, signing key, media and the bridge registrations (appservices/) all live here.
+    volumes:
+      - ./synapse:/data
+    networks: [default, edge]
+    # The image has its own healthcheck on :8008/health.
+
+  whatsapp:
+    image: dock.mau.dev/mautrix/whatsapp:v0.2610.0
+    restart: unless-stopped
+    depends_on:
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ./whatsapp:/data
+
+  gmessages:
+    image: dock.mau.dev/mautrix/gmessages:v0.2610.0
+    restart: unless-stopped
+    depends_on:
+      synapse:
+        condition: service_healthy
+    volumes:
+      - ./gmessages:/data
+
+networks:
+  edge:
+    external: true
