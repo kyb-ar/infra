@@ -9,6 +9,9 @@ on the home server has to be reachable from the internet.
 
 - `renew`: gets the certificate the first time, renews it when due, copies it
   to `../envoy/certs/home.kybar.win/`, and reloads Envoy when it changed.
+- `deploy-hook.sh`: run by certbot (inside its container) for each new
+  certificate; copies it into `../envoy/certs/` with the key readable only by
+  Envoy's uid.
 - `cloudflare.ini.example`: template for the Cloudflare API token.
 - `cloudflare.ini`, `letsencrypt/`: git-ignored. The token, plus the Let's
   Encrypt account and private keys. `letsencrypt/` is owned by root (Certbot

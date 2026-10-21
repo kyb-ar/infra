@@ -19,23 +19,15 @@ die() { echo "error: $*" >&2; exit 1; }
 [[ -f cloudflare.ini ]] || die "missing cloudflare.ini (copy cloudflare.ini.example and add the API token; see README.md)"
 chmod 600 cloudflare.ini
 
-# Runs inside the certbot container whenever a certificate is issued or renewed, with
-# $RENEWED_LINEAGE pointing at /etc/letsencrypt/live/<name>.
-HOOK="set -e
-d=/envoy-certs/$DOMAIN
-mkdir -p \"\$d\"
-cp \"\$RENEWED_LINEAGE/fullchain.pem\" \"\$RENEWED_LINEAGE/privkey.pem\" \"\$d/\"
-chown -R $ENVOY_UID:$ENVOY_UID \"\$d\"
-chmod 755 \"\$d\"
-chmod 644 \"\$d/fullchain.pem\"
-chmod 600 \"\$d/privkey.pem\"
-touch /envoy-certs/.renewed"
-
+# Runs certbot's image with our files mounted. deploy-hook.sh installs each new certificate
+# for Envoy (certbot needs the hook to be a command it can find, hence a script file).
 certbot() {
     docker run --rm \
         -v "$PWD/letsencrypt:/etc/letsencrypt" \
         -v "$PWD/cloudflare.ini:/cloudflare.ini:ro" \
+        -v "$PWD/deploy-hook.sh:/deploy-hook.sh:ro" \
         -v "$ENVOY_DIR/certs:/envoy-certs" \
+        -e ENVOY_UID="$ENVOY_UID" \
         "$@"
 }
 
@@ -46,13 +38,13 @@ certbot "$IMAGE" certonly \
     --dns-cloudflare --dns-cloudflare-credentials /cloudflare.ini \
     --dns-cloudflare-propagation-seconds 30 \
     --cert-name "$DOMAIN" -d "*.$DOMAIN" \
-    --deploy-hook "$HOOK"
+    --deploy-hook "sh /deploy-hook.sh"
 
 # The hook only runs when certbot gets a new certificate. Install the current one anyway if
 # Envoy's copy is missing (e.g. a fresh checkout of this repo next to an existing letsencrypt/).
 if [[ ! -f "$ENVOY_DIR/certs/$DOMAIN/fullchain.pem" ]]; then
     echo "Installing the existing certificate for Envoy"
-    certbot --entrypoint sh -e RENEWED_LINEAGE="/etc/letsencrypt/live/$DOMAIN" "$IMAGE" -c "$HOOK"
+    certbot --entrypoint sh -e RENEWED_LINEAGE="/etc/letsencrypt/live/$DOMAIN" "$IMAGE" /deploy-hook.sh
 fi
 
 if [[ -e "$ENVOY_DIR/certs/.renewed" ]]; then
