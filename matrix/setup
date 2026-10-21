@@ -49,7 +49,7 @@ set +a
 [[ -n "${ADMIN_USER:-}" ]] || die "set ADMIN_USER in .env"
 [[ "${POSTGRES_PASSWORD:-}" =~ ^[0-9a-f]+$ ]] ||
     die "POSTGRES_PASSWORD in .env must be hex (it is embedded in database URLs)"
-export PUBLIC_URL=${PUBLIC_URL:-http://matrix/}
+export PUBLIC_URL=${PUBLIC_URL:-https://matrix.home.kybar.win/}
 export BRIDGE="" DP_TOKEN="" HS_TOKEN="" LOCALPART=""
 
 docker network inspect edge >/dev/null 2>&1 ||
@@ -190,20 +190,22 @@ step "Checks"
 host=${PUBLIC_URL#*://}
 host=${host%%[:/]*}
 if ! getent hosts "$host" >/dev/null; then
-    echo "WARN: '$host' does not resolve on this machine. Add '127.0.0.1 $host' to /etc/hosts."
+    echo "WARN: '$host' does not resolve on this machine. Set up DNS for *.home.kybar.win"
+    echo "      (see ../envoy/README.md, \"DNS\"), or add '127.0.0.1 $host' to /etc/hosts."
 elif code=$(curl -s -o /dev/null -w '%{http_code}' "${PUBLIC_URL%/}/_matrix/client/versions") &&
     [[ "$code" == 200 ]]; then
     echo "OK: $PUBLIC_URL reaches Synapse through Envoy"
 else
     echo "WARN: ${PUBLIC_URL%/}/_matrix/client/versions returned $code."
-    echo "      Is the matrix route in ../envoy/envoy.yaml applied (../envoy/reload)?"
+    echo "      Is Envoy serving HTTPS (../certs/renew, then ../envoy/reload)? 000 means no"
+    echo "      connection or an untrusted certificate; Envoy's 404 means the route is missing."
 fi
 docker compose ps
 
 cat <<EOF
 
-Done. Next: link your accounts from Element Desktop (homeserver $PUBLIC_URL, user $mxid).
-  WhatsApp:        message @whatsappbot:$SERVER_NAME  ->  login qr
-  Google Messages: message @gmessagesbot:$SERVER_NAME ->  login  (then pick QR)
-See README.md for the phone side.
+Done. Next, with krb-tui (on the laptop, or here):
+  krb-tui matrix-login            # as $ADMIN_USER, at $PUBLIC_URL
+  krb-tui matrix-link whatsapp    # draws a QR code; scan it in WhatsApp -> Linked devices
+  krb-tui matrix-link gmessages   # scan it in Messages -> Device pairing
 EOF

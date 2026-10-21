@@ -2,6 +2,10 @@
 
 Small go-links redirector (go/<name> -> URL) running in Docker on the home server.
 
+Served at `https://go.home.kybar.win` through Envoy. `http://go/<name>` still
+works: Envoy redirects it to `https://go.home.kybar.win/<name>` (see
+`envoy/README.md`).
+
 - Repo: git@github.com:kyb-ar/golinks.git
 - Local checkout: ~/tmp/golinks
 - Server checkout: (location on server not recorded yet)
@@ -41,7 +45,8 @@ Environment variables:
 - `docker-compose.yml`: builds image `golinks:latest`,
   `restart: unless-stopped`, mounts `./data:/data:ro`. Publishes no ports;
   joins the external `edge` network and is served through Envoy (see
-  `envoy/README.md`) for hostnames `go` and `go.*`.
+  `envoy/README.md`) at `go.home.kybar.win`; `http://go/...` (and `go.*`) redirect there.
+  It is the only thing Envoy handles over plain HTTP.
 
 Status as of 2026-09-27: the switch from publishing `80:80` to the `edge`
 network is made in the local checkout but not yet committed, pushed, or

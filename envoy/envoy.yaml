@@ -1,13 +1,15 @@
 # Envoy edge proxy for the home server.
 #
 # Every service sits on the "edge" Docker network and is reached only through
-# Envoy. Requests are routed by Host header.
+# Envoy, over HTTPS at <app>.home.kybar.win (one wildcard certificate, see
+# ../certs). Plain HTTP serves nothing except one redirect: go/<name> ->
+# https://go.home.kybar.win/<name>, so typing go/foo in a browser keeps working.
 #
 # To add a service:
 #   1. Put its container on the "edge" network (no published ports).
 #   2. Add a cluster below pointing at <container-name>:<port>.
-#   3. Add a virtual_host in the HTTP listener (and the HTTPS listener, once
-#      that is enabled) mapping its hostnames to the cluster.
+#   3. Add a virtual_host in the HTTPS listener for <app>.home.kybar.win.
+#   4. DNS: nothing to do if *.home.kybar.win already resolves (see README.md).
 #
 # After editing, apply with ./reload (validates first, then restarts Envoy).
 
@@ -19,6 +21,7 @@ admin:
 
 static_resources:
   listeners:
+    # Plain HTTP: only the go/ redirect. Everything else requires HTTPS.
     - name: http
       address:
         socket_address: { address: 0.0.0.0, port_value: 8080 }
@@ -42,35 +45,85 @@ static_resources:
                 route_config:
                   name: http
                   virtual_hosts:
-                    - name: golinks
-                      # "go" for the bare LAN name, "go.*" for go.lan, go.home, etc.
+                    # Typing go/jira/X-1 in a browser requests http://go/jira/X-1.
+                    # Redirect it to https://go.home.kybar.win/jira/X-1 (path and
+                    # query kept). 307: not cached by browsers, keeps POST as POST.
+                    - name: golinks-redirect
+                      # "go" for the bare LAN name, "go.*" for go.lan,
+                      # go.home.kybar.win, etc.
                       domains: ["go", "go.*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          redirect:
+                            scheme_redirect: https
+                            host_redirect: go.home.kybar.win
+                            response_code: TEMPORARY_REDIRECT
+
+                    # Everything else is HTTPS-only: no redirect, so nothing is
+                    # ever sent to a backend over plain HTTP by accident.
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          direct_response:
+                            status: 404
+                            body: { inline_string: "Only HTTPS is served here: use https://<app>.home.kybar.win\n" }
+
+    # HTTPS: every service, with the *.home.kybar.win certificate from ../certs.
+    - name: https
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8443 }
+      filter_chains:
+        # One certificate covers every service, so a single chain without SNI
+        # matching. For a certificate on another domain, add a tls_inspector
+        # listener filter and a filter_chain_match: { server_names: [...] } chain.
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              common_tls_context:
+                alpn_protocols: ["h2", "http/1.1"]
+                tls_certificates:
+                  - certificate_chain: { filename: /etc/envoy/certs/home.kybar.win/fullchain.pem }
+                    private_key: { filename: /etc/envoy/certs/home.kybar.win/privkey.pem }
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: https
+                use_remote_address: true
+                strip_any_host_port: true
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: https
+                  virtual_hosts:
+                    - name: golinks
+                      domains: ["go.home.kybar.win"]
                       routes:
                         - match: { prefix: "/" }
                           route: { cluster: golinks }
 
                     - name: flashcards
-                      domains: ["flash", "flash.*", "flashcards", "flashcards.*"]
+                      domains: ["flash.home.kybar.win", "flashcards.home.kybar.win"]
                       routes:
                         - match: { prefix: "/" }
                           route: { cluster: flashcards }
 
                     - name: matrix
-                      domains: ["matrix", "matrix.*"]
+                      domains: ["matrix.home.kybar.win"]
                       routes:
                         - match: { prefix: "/" }
                           # Envoy's 15s default would cut off Matrix /sync long-polls
                           # (clients hold them open for ~30s) and slow media uploads.
                           route: { cluster: synapse, timeout: 300s }
 
-                    # Example for a service that should be HTTPS-only once the
-                    # HTTPS listener is enabled:
-                    #
-                    # - name: jira
-                    #   domains: ["jira", "jira.*"]
-                    #   require_tls: ALL
-
-                    # Anything else: 404 instead of guessing a backend.
                     - name: default
                       domains: ["*"]
                       routes:
@@ -78,53 +131,6 @@ static_resources:
                           direct_response:
                             status: 404
                             body: { inline_string: "No service for this hostname.\n" }
-
-    # HTTPS listener. To enable:
-    #   1. Put certs in ./certs (see README.md).
-    #   2. Uncomment this listener and the 443 port in docker-compose.yml.
-    #   3. Add one filter_chain per certificate, matched by SNI.
-    #
-    # - name: https
-    #   address:
-    #     socket_address: { address: 0.0.0.0, port_value: 8443 }
-    #   listener_filters:
-    #     - name: envoy.filters.listener.tls_inspector
-    #       typed_config:
-    #         "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
-    #   filter_chains:
-    #     - filter_chain_match:
-    #         server_names: ["jira.example.com"]
-    #       transport_socket:
-    #         name: envoy.transport_sockets.tls
-    #         typed_config:
-    #           "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
-    #           common_tls_context:
-    #             tls_certificates:
-    #               - certificate_chain: { filename: /etc/envoy/certs/jira.example.com/fullchain.pem }
-    #                 private_key: { filename: /etc/envoy/certs/jira.example.com/privkey.pem }
-    #       filters:
-    #         - name: envoy.filters.network.http_connection_manager
-    #           typed_config:
-    #             "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-    #             stat_prefix: https
-    #             use_remote_address: true
-    #             strip_any_host_port: true
-    #             access_log:
-    #               - name: envoy.access_loggers.stdout
-    #                 typed_config:
-    #                   "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
-    #             http_filters:
-    #               - name: envoy.filters.http.router
-    #                 typed_config:
-    #                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-    #             route_config:
-    #               name: https
-    #               virtual_hosts:
-    #                 - name: jira
-    #                   domains: ["jira.example.com"]
-    #                   routes:
-    #                     - match: { prefix: "/" }
-    #                       route: { cluster: jira }
 
   clusters:
     - name: golinks

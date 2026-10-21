@@ -6,7 +6,12 @@ services:
     # inside the container and Docker maps the privileged ports.
     ports:
       - "80:8080"
-      # - "443:8443"
+      - "443:8443"
+    environment:
+      # Pin the envoy user's ids: ../certs/renew makes the private key readable
+      # by exactly this uid.
+      ENVOY_UID: "101"
+      ENVOY_GID: "101"
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
       - ./certs:/etc/envoy/certs:ro

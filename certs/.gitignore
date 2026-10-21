@@ -1,0 +1,3 @@
+# The Cloudflare API token and Let's Encrypt account + private keys. Never commit these.
+cloudflare.ini
+letsencrypt/

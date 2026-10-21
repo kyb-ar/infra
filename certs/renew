@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Gets or renews the wildcard certificate for *.home.kybar.win from Let's Encrypt, installs it
+# for Envoy, and reloads Envoy if it changed. See README.md.
+#
+# Safe to run as often as you like (cron runs it weekly): certbot only renews a certificate
+# within 30 days of expiry, and Envoy is only reloaded when a new one was installed.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+DOMAIN=home.kybar.win
+IMAGE=certbot/dns-cloudflare:v5.8.0
+ENVOY_DIR=$(cd ../envoy && pwd)
+# Envoy runs as this uid/gid (pinned with ENVOY_UID/ENVOY_GID in ../envoy/docker-compose.yml),
+# so the private key can be readable by Envoy and nobody else.
+ENVOY_UID=101
+
+die() { echo "error: $*" >&2; exit 1; }
+
+[[ -f cloudflare.ini ]] || die "missing cloudflare.ini (copy cloudflare.ini.example and add the API token; see README.md)"
+chmod 600 cloudflare.ini
+
+# Runs inside the certbot container whenever a certificate is issued or renewed, with
+# $RENEWED_LINEAGE pointing at /etc/letsencrypt/live/<name>.
+HOOK="set -e
+d=/envoy-certs/$DOMAIN
+mkdir -p \"\$d\"
+cp \"\$RENEWED_LINEAGE/fullchain.pem\" \"\$RENEWED_LINEAGE/privkey.pem\" \"\$d/\"
+chown -R $ENVOY_UID:$ENVOY_UID \"\$d\"
+chmod 755 \"\$d\"
+chmod 644 \"\$d/fullchain.pem\"
+chmod 600 \"\$d/privkey.pem\"
+touch /envoy-certs/.renewed"
+
+certbot() {
+    docker run --rm \
+        -v "$PWD/letsencrypt:/etc/letsencrypt" \
+        -v "$PWD/cloudflare.ini:/cloudflare.ini:ro" \
+        -v "$ENVOY_DIR/certs:/envoy-certs" \
+        "$@"
+}
+
+echo "== Certificate for *.$DOMAIN"
+certbot "$IMAGE" certonly \
+    --non-interactive --agree-tos --register-unsafely-without-email \
+    --keep-until-expiring \
+    --dns-cloudflare --dns-cloudflare-credentials /cloudflare.ini \
+    --dns-cloudflare-propagation-seconds 30 \
+    --cert-name "$DOMAIN" -d "*.$DOMAIN" \
+    --deploy-hook "$HOOK"
+
+# The hook only runs when certbot gets a new certificate. Install the current one anyway if
+# Envoy's copy is missing (e.g. a fresh checkout of this repo next to an existing letsencrypt/).
+if [[ ! -f "$ENVOY_DIR/certs/$DOMAIN/fullchain.pem" ]]; then
+    echo "Installing the existing certificate for Envoy"
+    certbot --entrypoint sh -e RENEWED_LINEAGE="/etc/letsencrypt/live/$DOMAIN" "$IMAGE" -c "$HOOK"
+fi
+
+if [[ -e "$ENVOY_DIR/certs/.renewed" ]]; then
+    rm -f "$ENVOY_DIR/certs/.renewed"
+    echo "== New certificate installed in $ENVOY_DIR/certs/$DOMAIN"
+    if [[ -n "$(docker compose -f "$ENVOY_DIR/docker-compose.yml" ps -q envoy)" ]]; then
+        # Envoy only reads certificates at startup.
+        "$ENVOY_DIR/reload"
+    else
+        echo "Envoy is not running; it will use the new certificate when started."
+    fi
+else
+    echo "== Certificate unchanged; Envoy not reloaded"
+fi

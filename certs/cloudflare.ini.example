@@ -1,0 +1,4 @@
+# Copy to cloudflare.ini (git-ignored, chmod 600) and paste the API token.
+# Create the token in Cloudflare: My Profile -> API Tokens -> Create Token ->
+# "Edit zone DNS" template -> Zone Resources: Include, Specific zone, kybar.win.
+dns_cloudflare_api_token =
