@@ -46,28 +46,54 @@ use the `https://<app>.home.kybar.win` names.
 ## DNS
 
 Every device, the server included, must resolve `*.home.kybar.win` to the
-server's LAN IP. One wildcard record covers all current and future apps.
+server's LAN IP, `192.168.1.246`. One wildcard record covers all current and
+future apps. Set up as follows:
 
-**Option A (simplest): a public record in Cloudflare.** DNS -> Records -> Add:
-type `A`, name `*.home`, IPv4 = the server's LAN IP (e.g. `192.168.1.10`),
-proxy status **DNS only** (grey cloud). Works for every device with no router
-changes. Downsides: it publishes your LAN IP (nothing is reachable through it
-from outside), and some routers' "DNS rebinding protection" drops public
-answers that point at private IPs. If the names do not resolve at home, allow
-`home.kybar.win` in the router's rebinding settings, or use option B.
+1. **Cloudflare (done):** DNS -> Records: type `A`, name `*.home`, IPv4
+   `192.168.1.246`, proxy status **DNS only** (grey cloud). This publishes the
+   LAN IP, which is harmless: nothing is reachable through it from outside.
 
-**Option B: a wildcard in your LAN DNS.** dnsmasq-based (most routers, Pi-hole):
+2. **pfSense (the router, 192.168.1.1):** its DNS Resolver (Unbound) has DNS
+   rebinding protection, which throws away public answers that point at
+   private addresses like 192.168.x.x. Clients then get SERVFAIL, and waiting
+   does not help. Allow private answers for `home.kybar.win` only:
 
-    address=/home.kybar.win/192.168.1.10
+   1. pfSense web UI -> Services -> DNS Resolver -> General Settings.
+   2. Scroll to "Custom options" (click **Display Custom Options** if hidden).
+   3. Add these lines. If the box already has a `server:` line, add only the
+      `private-domain` line under the existing one:
 
-In Pi-hole v6 this goes in Settings -> All settings -> Miscellaneous ->
-`misc.dnsmasq_lines` (the "Local DNS Records" page does not do wildcards).
-The server itself also needs it, e.g. `/etc/hosts` entries per app if it does
-not use that DNS server.
+          server:
+          private-domain: "home.kybar.win"
 
-Check from any device:
+   4. **Save**, then **Apply Changes**. Unbound restarts, which also empties
+      its cache.
 
-    getent hosts matrix.home.kybar.win        # -> the server's LAN IP
+   Rebinding protection stays on for every other domain.
+
+   (If pfSense uses the DNS Forwarder (dnsmasq) instead of the Resolver:
+   Services -> DNS Forwarder -> Advanced Options:
+   `rebind-domain-ok=/home.kybar.win/`, then Save and Apply.)
+
+3. **Check**, on the laptop and on the server. Both commands should print
+   `192.168.1.246`:
+
+       dig +short go.home.kybar.win @192.168.1.1   # pfSense itself
+       getent hosts go.home.kybar.win               # what apps see
+
+   If `dig` works but `getent` does not, the machine cached the failure:
+   `resolvectl flush-caches` (systemd-resolved) and try again.
+
+**Alternative: answer locally instead of asking Cloudflare.** Same Custom
+options box in pfSense:
+
+    server:
+    local-zone: "home.kybar.win." redirect
+    local-data: "home.kybar.win. IN A 192.168.1.246"
+
+This keeps working when the internet is down and does not need the
+Cloudflare record, but the IP then lives in two places if you keep both.
+(Other dnsmasq-based routers and Pi-hole: `address=/home.kybar.win/192.168.1.246`.)
 
 ## First-time setup (on the server)
 
